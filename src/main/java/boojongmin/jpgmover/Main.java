@@ -35,7 +35,11 @@ public class Main {
     }
 
     private static void elapsedTimeChecker(FacadConsumer fn, String stageName) throws Exception {
+        System.out.printf("start -> %s\n", stageName);
+        long startTime = System.currentTimeMillis();
         fn.run(stageName);
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.printf("end -> %s, elapsed time %d(ms)\n", stageName, totalTime);
     }
 
 
@@ -55,7 +59,7 @@ public class Main {
 
     private static void checkInput(String[] args) {
         if(args.length != 2) {
-            System.out.println("your input size is not 2.\nexit\n");
+            System.out.println("[error] your input size is not 2.\nexit\n");
             System.exit(0);
         }
         source = new File(args[0]);
@@ -109,23 +113,31 @@ public class Main {
         }
     }
 
+    private static void processMetaInfoWithHandleException(File file) {
+        try {
+            processMetaInfo(file);
+        } catch (Exception e) {
+            System.out.println(e.getMessage());
+        }
+    }
+
     private static void putInfo(MetaInfo metaInfo) {
         SimpleDateFormat outFormat = new SimpleDateFormat("yyyyMMdd");
         String key = metaInfo.getModel() + File.separator + outFormat.format(metaInfo.getCreated());
         result.computeIfAbsent(key, k -> new ArrayList<>()).add(metaInfo);
     }
 
-    private static void walkFiles(File f) throws IOException, ParseException, ImageProcessingException {
+    private static void walkFiles(File f) throws IOException {
         if(f.isDirectory()) {
             File[] files = f.listFiles();
-            for (int i = 0; i < files.length; i++) {
-                walkFiles(files[i]);
+            for (File file : files) {
+                walkFiles(file);
             }
         } else {
-            String contentType = Files.probeContentType(f.toPath());
-            if(contentType.startsWith("image")) {
-                processMetaInfo(f);
-            }
+            Optional<String> contentTypeOpt = Optional.ofNullable(Files.probeContentType(f.toPath()));
+            contentTypeOpt.ifPresent(x -> {
+               if(x.startsWith("image")) processMetaInfoWithHandleException(f);
+            });
         }
     }
 }
