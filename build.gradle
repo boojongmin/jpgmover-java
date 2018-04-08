@@ -10,6 +10,8 @@ dependencies {
     compile 'org.projectlombok:lombok:1.16.20'
     compile 'commons-codec:commons-codec:1.11'
     compile group: 'ch.qos.logback', name: 'logback-classic', version: '1.2.3'
+    compile group: 'log4j', name: 'log4j', version: '1.2.17'
+
 
 }
 
