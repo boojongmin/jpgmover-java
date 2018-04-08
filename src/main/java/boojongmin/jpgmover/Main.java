@@ -76,7 +76,7 @@ public class Main {
             Path dir = path.resolve(key);
             File file = dir.toFile();
             if(!file.exists()) {
-                file.mkdir();
+                file.mkdirs();
             }
             List<MetaInfo> infos = result.get(key);
             for (MetaInfo info : infos) {
@@ -111,7 +111,7 @@ public class Main {
 
     private static void putInfo(MetaInfo metaInfo) {
         SimpleDateFormat outFormat = new SimpleDateFormat("yyyyMMdd");
-        String key = outFormat.format(metaInfo.getCreated());
+        String key = metaInfo.getModel() + File.separator + outFormat.format(metaInfo.getCreated());
         result.computeIfAbsent(key, k -> new ArrayList<>()).add(metaInfo);
     }
 
@@ -122,7 +122,10 @@ public class Main {
                 walkFiles(files[i]);
             }
         } else {
-            processMetaInfo(f);
+            String contentType = Files.probeContentType(f.toPath());
+            if(contentType.startsWith("image")) {
+                processMetaInfo(f);
+            }
         }
     }
 }
