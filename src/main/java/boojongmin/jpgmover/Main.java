@@ -2,6 +2,7 @@ package boojongmin.jpgmover;
 
 import com.drew.imaging.ImageMetadataReader;
 import com.drew.imaging.ImageProcessingException;
+import com.drew.metadata.Directory;
 import com.drew.metadata.Metadata;
 import com.drew.metadata.Tag;
 import com.drew.metadata.exif.ExifIFD0Directory;
@@ -15,9 +16,7 @@ import java.nio.file.*;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.*;
 
 public class Main {
     static org.apache.log4j.Logger log = org.apache.log4j.Logger.getLogger("Main");
@@ -28,14 +27,14 @@ public class Main {
     static File source;
     static File destination;
     static Set<String> duplicateSet = ConcurrentHashMap.newKeySet();
-    static ForkJoinPool pool = ForkJoinPool.commonPool();
+    static ExecutorService pool = Executors.newFixedThreadPool(4);
     public static void main(String[] args) throws Exception {
         elapsedTimeChecker(() -> {
             checkInput(args);
             walkFiles(source);
+            pool.shutdown();
+            pool.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }, "1. collect file info" );
-        pool.shutdown();
-        pool.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
 
         printReport();
 
@@ -86,15 +85,13 @@ public class Main {
         } catch (Exception e) {
             log.info(String.format("[error when move jpg] %s\n", e.getMessage()));
             errLogger.error(String.format("[error when move jpg] %s\n", e.getMessage()), e);
-
         }
     }
 
-    private static void moveJpg() throws InterruptedException {
+    private static void moveJpg() {
         if(!destination.exists()) {
             destination.mkdirs();
         }
-        ForkJoinPool copyPool = ForkJoinPool.commonPool();
         Path path = Paths.get(destination.toURI());
 
         for (String key : result.keySet()) {
@@ -106,17 +103,13 @@ public class Main {
             List<MetaInfo> infos = result.get(key);
             for (MetaInfo info : infos) {
                 File target = info.getFile();
-                copyPool.submit(() -> {
-                    try {
-                        Files.copy(Paths.get(target.toURI()), dir.resolve(target.getName()), StandardCopyOption.REPLACE_EXISTING);
-                    } catch (Exception e) {
-                        errLogger.info(String.format("[copy error] folder: %s, file name: %s\n", dir.toFile().getAbsolutePath(), target.getName()));
-                        errLogger.error("file copy error", e);
-                    }
-                });
+                try {
+                    Files.move(Paths.get(target.toURI()), dir.resolve(target.getName()), StandardCopyOption.REPLACE_EXISTING);
+                } catch (Exception e) {
+                    errLogger.info(String.format("[copy error] folder: %s, file name: %s\n", dir.toFile().getAbsolutePath(), target.getName()));
+                    errLogger.error("file copy error", e);
+                }
             }
-            copyPool.shutdown();
-            copyPool.awaitTermination(Long.MAX_VALUE, TimeUnit.MICROSECONDS);
         }
     }
 
@@ -133,11 +126,11 @@ public class Main {
 
     private static void processMetaInfo(File file) throws ImageProcessingException, IOException, ParseException {
         Metadata metadata = ImageMetadataReader.readMetadata(file);
-        Collection<ExifIFD0Directory> exifIFD0Directories = metadata.getDirectoriesOfType(ExifIFD0Directory.class);
+        Iterable<Directory> directories = metadata.getDirectories();
         SimpleDateFormat inputFormat = new SimpleDateFormat("yyyy:MM:dd HH:mm:ss");
         MetaInfo metaInfo = new MetaInfo();
         metaInfo.setFile(file);
-        for (ExifIFD0Directory directory : exifIFD0Directories) {
+        for (Directory directory : directories) {
             for (Tag tag : directory.getTags()) {
                 if(tag.getTagName().equals("Model")) {
                     metaInfo.setModel(tag.getDescription());
@@ -146,6 +139,9 @@ public class Main {
                     metaInfo.setCreated(created);
                 }
             }
+        }
+        if(metaInfo.getCreated() == null) {
+            metaInfo.setCreated(new Date(0L));
         }
         String sha256Hex = DigestUtils.sha256Hex(Files.readAllBytes(file.toPath()));
         if(!duplicateSet.contains(sha256Hex)) {
