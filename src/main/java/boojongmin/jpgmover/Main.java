@@ -1,39 +1,41 @@
 package boojongmin.jpgmover;
 
+import com.drew.imaging.FileTypeDetector;
 import com.drew.imaging.ImageMetadataReader;
 import com.drew.imaging.ImageProcessingException;
 import com.drew.metadata.Directory;
 import com.drew.metadata.Metadata;
 import com.drew.metadata.Tag;
-import com.drew.metadata.exif.ExifIFD0Directory;
+import com.drew.metadata.mp4.Mp4Directory;
+import com.drew.metadata.mp4.media.Mp4VideoDirectory;
 import lombok.Data;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.io.FilenameUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.*;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.*;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
-import java.util.concurrent.*;
 
 public class Main {
-    static org.apache.log4j.Logger log = org.apache.log4j.Logger.getLogger("Main");
     static Logger errLogger = LoggerFactory.getLogger("Main");
-
-
-    static Map<String, List<MetaInfo>> result = new ConcurrentHashMap<>();
+    static Map<String, List<MetaInfo>> result = new HashMap<>();
     static File source;
     static File destination;
-    static Set<String> duplicateSet = ConcurrentHashMap.newKeySet();
-    static ExecutorService pool = Executors.newFixedThreadPool(4);
+    static Set<String> duplicateSet = new HashSet<>();
+    static ByteBuffer byteBuffer = ByteBuffer.allocate(1024 * 1024);
+    static SimpleDateFormat outputFormat = new SimpleDateFormat("hhmmss");
+    static int index = 0;
+
     public static void main(String[] args) throws Exception {
         elapsedTimeChecker(() -> {
             checkInput(args);
             walkFiles(source);
-            pool.shutdown();
-            pool.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
         }, "1. collect file info" );
 
         printReport();
@@ -41,21 +43,42 @@ public class Main {
         elapsedTimeChecker(() -> {
             moveJpgWithErrorHandling();
         }, "2. move files");
-        log.info("complete");
+        System.out.println("complete");
+        walkForDelete(source);
+    }
+
+    private static void walkForDelete(File file) {
+        if(file.isDirectory()) {
+            String[] fileArr = file.list();
+            if(fileArr.length > 0) {
+                for (File f : file.listFiles()) {
+                    walkForDelete(f);
+                }
+                deleteEmptyFolder(file);
+            } else {
+                deleteEmptyFolder(file);
+            }
+        }
+    }
+    private static void deleteEmptyFolder(File f) {
+        if(f.list().length == 0) {
+            System.out.println(">>> delete empty folder" + f.getName());
+            f.delete();
+        }
     }
 
     private static void elapsedTimeChecker(FacadConsumer fn, String stageName) throws Exception {
-        log.info(String.format("start -> %s\n", stageName));
+        System.out.println(String.format("start -> %s", stageName));
         long startTime = System.currentTimeMillis();
         fn.run(stageName);
         long totalTime = System.currentTimeMillis() - startTime;
-        log.info(String.format("end -> %s, elapsed time %d(ms)\n", stageName, totalTime));
+        System.out.println(String.format("end -> %s, elapsed time %d(ms)", stageName, totalTime));
     }
 
 
     private static void printReport() {
-        log.info(String.format("total image count is %d\n", result.values().stream().map(x -> x.size()).reduce(0, Integer::sum)));
-        log.info(String.format("total image size is %.2f Mb\n",
+        System.out.println(String.format("total image count is %d", result.values().stream().map(x -> x.size()).reduce(0, Integer::sum)));
+        System.out.println(String.format("total image size is %.2f Mb",
             result.values().stream().map(x ->
                 x.stream()
                     .map(y -> y.getFile().length())
@@ -68,112 +91,168 @@ public class Main {
 
     private static void checkInput(String[] args) {
         if(args.length != 2) {
-            log.info("[error] your input size is not 2.\nexit\n");
+            System.out.println("[error] your input size is not 2.\nexit");
             System.exit(0);
         }
         source = new File(args[0]);
         destination = new File(args[1]);
         if(!source.exists()) {
-            log.info("first argument is wrong. check image path");
+            System.out.println("first argument is wrong. check image path");
         }
 
     }
 
     private static void moveJpgWithErrorHandling() {
         try {
-            moveJpg();
+            moveMedia();
         } catch (Exception e) {
-            log.info(String.format("[error when move jpg] %s\n", e.getMessage()));
-            errLogger.error(String.format("[error when move jpg] %s\n", e.getMessage()), e);
+            System.out.println(String.format("[error when move jpg] %s", e.getMessage()));
+            errLogger.error(String.format("[error when move jpg] %s", e.getMessage()), e);
         }
     }
 
-    private static void moveJpg() {
+    private static void moveMedia() {
         if(!destination.exists()) {
             destination.mkdirs();
         }
         Path path = Paths.get(destination.toURI());
 
         for (String key : result.keySet()) {
-            Path dir = path.resolve(key);
-            File file = dir.toFile();
-            if(!file.exists()) {
-                file.mkdirs();
-            }
-            List<MetaInfo> infos = result.get(key);
-            for (MetaInfo info : infos) {
-                File target = info.getFile();
-                try {
-                    Files.move(Paths.get(target.toURI()), dir.resolve(target.getName()), StandardCopyOption.REPLACE_EXISTING);
-                } catch (Exception e) {
-                    errLogger.info(String.format("[copy error] folder: %s, file name: %s\n", dir.toFile().getAbsolutePath(), target.getName()));
-                    errLogger.error("file copy error", e);
+            try {
+                Path dir = path.resolve(key);
+                File file = dir.toFile();
+                if (!file.exists()) {
+                    file.mkdirs();
                 }
+                List<MetaInfo> infos = result.get(key);
+                for (MetaInfo info : infos) {
+                    File target = info.getFile();
+                    try {
+                        String fileName = target.getName();
+                        String baseName = FilenameUtils.getBaseName(fileName);
+                        String extensionName = FilenameUtils.getExtension(fileName);
+                        String format = outputFormat.format(info.getCreated());
+                        String resultFileName = String.format("%s-%s", baseName, format);
+                        if (!"".equals(extensionName)) {
+                            resultFileName += "." + extensionName;
+                        }
+                        Path targetPath = Paths.get(target.toURI());
+                        Path movePath = dir.resolve(resultFileName);
+                        if(movePath.toFile().exists()) {
+                            targetPath.toFile().delete();
+                        } else {
+                            Files.move(targetPath, movePath, StandardCopyOption.REPLACE_EXISTING);
+                        }
+                    } catch (Exception e) {
+                        errLogger.info(String.format("[copy error] folder: %s, file name: %s", dir.toFile().getAbsolutePath(), target.getName()));
+                        errLogger.error("file copy error", e);
+                    }
+                }
+            } catch (Exception e) {
+                System.out.println("[copy error] " + e.getMessage());
+                errLogger.error("file copy error ", e);
             }
         }
     }
 
-    private static void processMetaInfoWithHandleException(File file) {
+    private static String getFileExtension(File file) {
+        String fileName = file.getName();
+        if(fileName.lastIndexOf(".") != -1 && fileName.lastIndexOf(".") != 0)
+            return fileName.substring(fileName.lastIndexOf(".")+1);
+        else return "";
+    }
+
+    private static void processMetaInfoWithHandleException(File file, MediaType mediaType) {
         try {
-            processMetaInfo(file);
+            processMetaInfo(file, mediaType);
         } catch (Exception e) {
-            log.info(e.getMessage());
-            log.info(String.format("error file path :  %s", file.getAbsolutePath()));
+            System.out.println(e.getMessage());
+            System.out.println(String.format("error file path :  %s", file.getAbsolutePath()));
             errLogger.error(String.format("error file path :  %s", file.getAbsolutePath()));
             errLogger.error("processMetaInfoWithHandleException", e);
         }
     }
 
-    private static void processMetaInfo(File file) throws ImageProcessingException, IOException, ParseException {
+    private static void processMetaInfo(File file, MediaType mediaType) throws ImageProcessingException, IOException, ParseException {
         Metadata metadata = ImageMetadataReader.readMetadata(file);
         Iterable<Directory> directories = metadata.getDirectories();
         SimpleDateFormat inputFormat = new SimpleDateFormat("yyyy:MM:dd HH:mm:ss");
         MetaInfo metaInfo = new MetaInfo();
         metaInfo.setFile(file);
-        for (Directory directory : directories) {
-            for (Tag tag : directory.getTags()) {
-                if(tag.getTagName().equals("Model")) {
-                    metaInfo.setModel(tag.getDescription());
-                } else if(tag.getTagName().equals("Date/Time")) {
-                    Date created = inputFormat.parse(tag.getDescription());
-                    metaInfo.setCreated(created);
+        metaInfo.setMediaType(mediaType);
+        if(MediaType.Image == mediaType) {
+            for (Directory directory : directories) {
+                for (Tag tag : directory.getTags()) {
+                    if(tag.getTagName().equals("Model")) {
+                        metaInfo.setModel(tag.getDescription());
+                    } else if(tag.getTagName().equals("Date/Time")) {
+                        Date created = inputFormat.parse(tag.getDescription());
+                        metaInfo.setCreated(created);
+                    }
                 }
             }
+        } else if(MediaType.Video == mediaType) {
+            Mp4Directory mp4Directory = metadata.getFirstDirectoryOfType(Mp4Directory.class);
+            Date date = mp4Directory.getDate(Mp4Directory.TAG_CREATION_TIME);
+            if(date == null) {
+                mp4Directory = metadata.getFirstDirectoryOfType(Mp4VideoDirectory.class);
+                date = mp4Directory.getDate(Mp4VideoDirectory.TAG_CREATION_TIME);
+                if(date == null) {
+                    date = new Date(0L);
+                }
+            }
+            metaInfo.setCreated(date);
         }
+
+
         if(metaInfo.getCreated() == null) {
             metaInfo.setCreated(new Date(0L));
         }
-        String sha256Hex = DigestUtils.sha256Hex(Files.readAllBytes(file.toPath()));
-        if(!duplicateSet.contains(sha256Hex)) {
-            duplicateSet.add(sha256Hex);
-            putInfo(metaInfo);
+        byteBuffer.clear();
+        FileChannel fileChannel = FileChannel.open(file.toPath(), StandardOpenOption.READ);
+        fileChannel.read(byteBuffer);
+        String md5Hex = DigestUtils.md5Hex(byteBuffer.array());
+
+        if(!duplicateSet.contains(md5Hex)) {
+            duplicateSet.add(md5Hex);
+            putInfo(metaInfo, mediaType);
         }
     }
 
-
-    private static void putInfo(MetaInfo metaInfo) {
+    private static void putInfo(MetaInfo metaInfo, MediaType mediaType) {
         SimpleDateFormat outFormat = new SimpleDateFormat("yyyyMMdd");
-        String key = metaInfo.getModel() + File.separator + outFormat.format(metaInfo.getCreated());
+        String key;
+        if(MediaType.Image == mediaType) {
+            key = mediaType.getName() + File.separator + metaInfo.getModel() + File.separator + outFormat.format(metaInfo.getCreated());
+        } else {
+            key = mediaType.getName() + File.separator + outFormat.format(metaInfo.getCreated());
+        }
         result.computeIfAbsent(key, k -> new ArrayList<>()).add(metaInfo);
     }
 
-    private static void walkFiles(File f) throws IOException {
+    private static void walkFiles(File f) {
         if(f.isDirectory()) {
             File[] files = f.listFiles();
             for (File file : files) {
                 walkFiles(file);
             }
         } else {
-            pool.execute(() -> {
-                try {
-                    Optional<String> contentTypeOpt = Optional.ofNullable(Files.probeContentType(f.toPath()));
-                    contentTypeOpt.ifPresent(x -> {
-                        if(x.startsWith("image")) processMetaInfoWithHandleException(f);
-                    });
-                } catch (Exception e) {
-                    errLogger.error(String.format("[error when work files] %s\n", e.getMessage()));
+            try {
+                index++;
+                if(index % 1000 == 0) {
+                    System.out.println(">>> processing count " + index);
                 }
-            });
+                Optional<String> contentTypeOpt = Optional.ofNullable(Files.probeContentType(f.toPath()));
+                contentTypeOpt.ifPresent(x -> {
+                   if(x.startsWith("image") ) {
+                        processMetaInfoWithHandleException(f, MediaType.Image);
+                    } else if(x.startsWith("video")) {
+                       processMetaInfoWithHandleException(f, MediaType.Video);
+                   }
+                });
+            } catch (Exception e) {
+                errLogger.error(String.format("[error when walk files] %sn", e.getMessage()));
+            }
         }
     }
 }
@@ -183,6 +262,12 @@ class MetaInfo {
     private String model;
     private Date created;
     private File file;
+    private MediaType mediaType;
+    public String getModel() {
+        if(model == null) return "";
+        return model.replaceAll("[<,>,:,\",\\/,\\\\,|,?,*]", "").trim();
+    }
+
 }
 
 @FunctionalInterface
@@ -194,10 +279,24 @@ interface FacadConsumer {
         try {
             run();
         } catch(Exception e) {
-            Main.log.info(String.format("[error %s] %s", stageName, e.getMessage()));
+            System.out.println(String.format("[error %s] %s", stageName, e.getMessage()));
         }
         long endTime = System.currentTimeMillis();
         long totalTime =  endTime - startTime;
-        Main.log.info(String.format("[elapsed time] %s : %d(ms)\n", stageName, totalTime));
+        System.out.println(String.format("[elapsed time] %s : %d(ms)", stageName, totalTime));
     }
+}
+
+enum MediaType {
+    Image("image"), Video("video");
+    private final String name;
+    MediaType(String name) {
+        this.name = name;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+
 }
